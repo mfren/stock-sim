@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"math"
 	"math/rand"
@@ -12,7 +13,14 @@ import (
 	"time"
 )
 
-const apiAddr string = "https://www.alphavantage.co"
+var NUM_SIMS = flag.Int("sims", 10_000, "Number of simulations to run")
+var SIM_LENGTH = flag.Int("len", 365, "Length of each simulation")
+var DISPLAY_STATS = flag.Bool("stats", false, "Display dataset statistics")
+var API_KEY = flag.String("apikey", "", "API Key")
+
+const API_ADDR = "https://www.alphavantage.co"
+
+var HTTP_CLIENT = &http.Client{Timeout: 10 * time.Second}
 
 type ResponseBody struct {
 	MetaData        MetaData             `json:"Meta Data"`
@@ -38,47 +46,27 @@ type DataPoint struct {
 	SplitCoefficient string `json:"8. split coefficient"`
 }
 
-var myClient = &http.Client{Timeout: 10 * time.Second}
-
+/* Gets the stock data from the web api */
 func getData(stockName string, target interface{}) error {
 
 	var url = fmt.Sprintf(
 		"%s/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=%s&outputsize=full&apikey=%s",
-		apiAddr, stockName, os.Getenv("API_KEY"),
+		API_ADDR, stockName, *API_KEY,
 	)
 
-	fmt.Println(url)
-
-	r, err := myClient.Get(url)
-
+	r, err := HTTP_CLIENT.Get(url)
 	if err != nil {
 		fmt.Printf("error making http request: %s\n", err)
 	}
 	defer r.Body.Close()
 
-	// fmt.Print(res.Body.Read())
-	fmt.Printf("client: got response!\n")
-	fmt.Printf("client: status code: %d\n", r.StatusCode)
-
 	return json.NewDecoder(r.Body).Decode(target)
 }
 
-func main() {
+/* Calculates the differences between open/closes for all datapoints */
+func calcDiffs(data map[string]DataPoint, target []float64) []float64 {
 
-	data := new(ResponseBody)
-
-	getData("BA.LON", data)
-
-	// Calculate the average daily increase
-	// Calculate the variance of daily increases across the data
-	//		We need the mean of the daily increases
-	//		total number of entries
-
-	var avgReturn float64 = 0
-	var totalEntries int = 0
-	var diffs []float64
-
-	for _, value := range data.TimeSeriesDaily {
+	for _, value := range data {
 
 		var open, close float64
 		var err error
@@ -94,75 +82,104 @@ func main() {
 		}
 
 		diff := math.Log(close / open)
-		// diff := (close / open) - 1
-		fmt.Println(diff)
-		diffs = append(diffs, diff)
-		avgReturn += diff
-		totalEntries++
+		target = append(target, diff)
 	}
 
-	avgReturn /= float64(totalEntries)
-	fmt.Println("Average increase:", avgReturn)
+	return target
+}
 
-	// Calculate variance
-	var variance float64 = 0
-	for _, diff := range diffs {
-		variance += math.Pow(diff-avgReturn, 2)
+/* Calculates the mean average across a dataset of float64s */
+func calcMeanAvg(data []float64) float64 {
+
+	total := 0.0
+	num := 0
+
+	for _, val := range data {
+		total += val
+		num++
 	}
-	variance /= float64(totalEntries)
-	fmt.Println("Variance:", variance)
 
-	standDev := math.Sqrt(variance)
-	fmt.Println("Standard Deviation:", standDev)
+	return total / float64(num)
+}
 
-	// ^^^ Stats ^^^
-	// vvv  Sim  vvv
+/* Calculates the variance across a dataset of float64s */
+func calcVariance(avg float64, data []float64) float64 {
 
-	const numSims = 10000
-	const simLength = 365
+	// Variance uses the formula:
+	//		(Sum((x - avg) ^ 2)) / n
+	// Where n is the number of values, x is the value, and avg is the average across the set
+	// https://en.wikipedia.org/wiki/Variance
 
-	var simValues [numSims][simLength]float64
+	variance := 0.0
+	num := 0
 
-	var drift float64 = avgReturn - (0.5 * variance)
-	fmt.Println("Drift:", drift)
+	for _, diff := range data {
+		variance += math.Pow(diff-avg, 2)
+		num++
+	}
 
-	for simNum := 0; simNum < numSims; simNum++ {
-		var values = &simValues[simNum]
+	return variance / float64(num)
+}
 
+func main() {
+
+	// Pull in necessary CLI args, setting defaults if not there
+	flag.Parse()
+
+	// Get data from the web datasource
+	data := new(ResponseBody)
+	getData("GOOG", data)
+
+	// We're using brownian motion to determine stock price rises, so we need the following info from the dataset
+	//	1. Average daily increase
+	//	2. Variance of daily increases
+	//	3. Standard Deviation of daily increases (simply the square root of the variance)
+
+	// Allocate space for the daily increases, and use the helper function to calculate them
+	var diffs []float64
+	diffs = calcDiffs(data.TimeSeriesDaily, diffs)
+
+	avg := calcMeanAvg(diffs)
+	variance := calcVariance(avg, diffs)
+	stdDev := math.Sqrt(variance)
+	drift := avg - (0.5 * variance)
+
+	if *DISPLAY_STATS {
+		fmt.Printf("Average: %.5f\nVariance: %.5f\nStandard Deviation: %.5f\n\nDrift: %.5f\n", avg, variance, stdDev, drift)
+	}
+
+	// Define storage for simulation numbers
+	var simValues [][]float64 = make([][]float64, *NUM_SIMS)
+
+	for simNum := 0; simNum < *NUM_SIMS; simNum++ {
+		var values = make([]float64, *SIM_LENGTH)
+		simValues[simNum] = values
+
+		// We start at 1, as this allows the simualtion to then be applied to a number of different starting points
 		values[0] = 1
 
-		for i := 1; i < simLength; i++ {
+		for i := 1; i < *SIM_LENGTH; i++ {
 
-			var lastPrice = values[i-1]
+			random := rand.NormFloat64()
+			volatility := stdDev * random
+			brownianMotion := drift + volatility
 
-			// random := rand.NormFloat64()
-			// change := lastPrice * ((avgReturn * 1) + (standDev * random * math.Sqrt(1)))
-			// values[i] = lastPrice + change
-
-			var random = rand.NormFloat64()
-			var volatility = standDev * random
-			var brownianMotion = drift + volatility
-
-			var newPrice = lastPrice * math.Pow(math.E, brownianMotion)
-			values[i] = newPrice
-
+			newValue := values[i-1] * math.Pow(math.E, brownianMotion)
+			values[i] = newValue
 		}
-
 	}
-
-	// ^^^     Sims      ^^^
-	// vvv Meta Analysis vvv
 
 	// Sort the sims based on the end value
 	sort.Slice(simValues[:], func(i, j int) bool {
-		return simValues[i][simLength-1] < simValues[j][simLength-1]
+		return simValues[i][*SIM_LENGTH-1] < simValues[j][*SIM_LENGTH-1]
 	})
 
-	// We want to select the 99th, 95th, 85th and 75th percentile sims
-	selectedSims := []([simLength]float64){simValues[4000], simValues[4500], simValues[5000], simValues[5500], simValues[6000]}
+	// We want to select the 40th, 45th, 50th, 55th and 60th percentile simulations
+	selectedSims := []([]float64){simValues[4000], simValues[4500], simValues[5000], simValues[5500], simValues[6000]}
 
-	// vvv CSV  vvv
+	// We now are going to write the data to a CSV, however, we need to write each time interval as a row
 
+	// Open a new CSV file
 	fo, err := os.Create("output.csv")
 	if err != nil {
 		panic(err)
@@ -174,7 +191,8 @@ func main() {
 		}
 	}()
 
-	for i := 0; i < simLength; i++ {
+	// Loop through each time period and write all the selected simulation's data for that time period on the row
+	for i := 0; i < *SIM_LENGTH; i++ {
 		fmt.Fprintf(fo, "%d,", i)
 		for simNum := 0; simNum < 5; simNum++ {
 			fmt.Fprintf(fo, "%.5f,", selectedSims[simNum][i]-1)
