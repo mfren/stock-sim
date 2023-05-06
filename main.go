@@ -17,6 +17,7 @@ var NUM_SIMS = flag.Int("sims", 10_000, "Number of simulations to run")
 var SIM_LENGTH = flag.Int("len", 365, "Length of each simulation")
 var DISPLAY_STATS = flag.Bool("stats", false, "Display dataset statistics")
 var API_KEY = flag.String("apikey", "", "API Key")
+var TICKER = flag.String("stock", "GOOG", "Stock ticker to simulate")
 
 const API_ADDR = "https://www.alphavantage.co"
 
@@ -128,7 +129,7 @@ func main() {
 
 	// Get data from the web datasource
 	data := new(ResponseBody)
-	getData("GOOG", data)
+	getData(*TICKER, data)
 
 	// We're using brownian motion to determine stock price rises, so we need the following info from the dataset
 	//	1. Average daily increase
@@ -175,7 +176,13 @@ func main() {
 	})
 
 	// We want to select the 40th, 45th, 50th, 55th and 60th percentile simulations
-	selectedSims := []([]float64){simValues[4000], simValues[4500], simValues[5000], simValues[5500], simValues[6000]}
+	selectedSims := []([]float64){
+		simValues[int(math.Floor(float64(*NUM_SIMS)*0.4))],
+		simValues[int(math.Floor(float64(*NUM_SIMS)*0.45))],
+		simValues[int(math.Floor(float64(*NUM_SIMS)*0.5))],
+		simValues[int(math.Floor(float64(*NUM_SIMS)*0.55))],
+		simValues[int(math.Floor(float64(*NUM_SIMS)*0.60))],
+	}
 
 	// We now are going to write the data to a CSV, however, we need to write each time interval as a row
 
@@ -194,7 +201,7 @@ func main() {
 	// Loop through each time period and write all the selected simulation's data for that time period on the row
 	for i := 0; i < *SIM_LENGTH; i++ {
 		fmt.Fprintf(fo, "%d,", i)
-		for simNum := 0; simNum < 5; simNum++ {
+		for simNum := 0; simNum < len(selectedSims); simNum++ {
 			fmt.Fprintf(fo, "%.5f,", selectedSims[simNum][i]-1)
 		}
 		fmt.Fprint(fo, "\n")
